@@ -1,789 +1,599 @@
 <?php
-define('bibnum_PLUGIN_VERSION', get_plugin_ini('bibnum', 'version'));
+/**
+ * Live Book (plugin for Omeka)
+ *
+ * Manages digitalized books or images with Omeka: zoom and flip of pages,
+ * extraction and displaying of table of contents from PDF, full text search
+ * from an XML content (KWIC)...
+ *
+ * @see README.md
+ *
+ * @copyright Daniel Berthereau, 2013
+ * @copyright Julien Sicot (Université Rennes 2), 2010-2013 [bibnum v0.5]
+ * @license http://www.gnu.org/licenses/gpl-3.0.txt
+ * @package LiveBook
+ */
 
-add_plugin_hook('install', 'bibnum_install');
-add_plugin_hook('uninstall', 'bibnum_uninstall');
-add_plugin_hook('config_form', 'bibnum_config_form');
-add_plugin_hook('config', 'bibnum_config');
-add_plugin_hook('public_theme_header', 'bibnum_public_theme_header');
-add_plugin_hook('public_append_to_items_show', 'bibnum_append_to_item');
-add_plugin_hook('public_append_to_items_show', 'bibnum_tableOfContent');
-add_plugin_hook('public_append_to_items_show', 'bibnum_searchContent');
-
-
-define('BIBNUM_PLUGIN_DIRECTORY', dirname(__FILE__));
-define('BIBNUM_XML_DIRECTORY', get_option('bibnum_xml_directory'));
-define('BIBNUM_PDFTOHTML', get_option('bibnum_pdftohtml_path'));
-define('BIBNUM_PDFTK', get_option('bibnum_pdftk_path'));
-
-
-//installation du plugin dans omeka
-function bibnum_install()
-{
-	set_option('bibnum_plugin_version', BIBNUM_PLUGIN_VERSION);
-	set_option('bibnum_pdftohtml_path', $pdftohtmlPath);
-	set_option('bibnum_pdftk_path', $pdftkPath);   
-	set_option('bibnum_xml_directory', BIBNUM_PLUGIN_DIRECTORY.
-		DIRECTORY_SEPARATOR.
-		'xml');                                                                                                                      
-}
-
-//désinstallation du plugin
-function bibnum_uninstall()
-{
-	delete_option('bibnum_plugin_version');
-	delete_option('bibnum_pdftohtml_path');
-	delete_option('bibnum_pdftk_path');
-	delete_option('bibnum_xml_directory');
-}
-
-//ajout d'une css et de codes js ds le header du theme
-function bibnum_public_theme_header($request) 
-{
-	//js
-	echo bibnum_javascripts();
-	//css
-	$html .= bibnum_css('bibnum', 'public');
-
-}
-
+require_once file_exists(get_option('live_book_custom_library'))
+    ? get_option('live_book_custom_library')
+    // We need a hard coded path to avoid error when module isn't yet installed.
+    : dirname(__FILE__) . DIRECTORY_SEPARATOR . 'libraries' . DIRECTORY_SEPARATOR . 'live_book_custom.php';
 
 /**
-* Shows the configuration form.
-*/
-function bibnum_config_form()
+ * Contains code used to integrate the plugin into Omeka.
+ *
+ * @package LiveBook
+ */
+class LiveBookPlugin extends Omeka_Plugin_Abstract
 {
-	$pdftohtmlPath = get_option('bibnum_pdftohtml_path');
-	$pdftkPath = get_option('bibnum_pdftk_path');
-	$xmlDirectory = get_option('bibnum_xml_directory');
+    protected $_hooks = array(
+        'install',
+        'uninstall',
+        'config_form',
+        'config',
+        'admin_theme_header',
+        'public_theme_header',
+        'admin_append_to_items_show_primary',
+        'public_append_to_item',
+    // TODO To be cleaned and finished.
+    // add_plugin_hook('public_append_to_items_show', 'live_book_append_to_item');
+    // add_plugin_hook('public_append_to_items_show', 'live_book_tableOfContent');
+    // add_plugin_hook('public_append_to_items_show', 'live_book_searchContent');
+    );
 
-	include 'config_form.php';
+    protected $_options = array(
+        'live_book_custom_library' => 'libraries/live_book_custom.php',
+        'live_book_zoomify' => false,
+        'live_book_thumbnails_by_view' => '5x7',
+        // TODO To be moved to specific libraries.
+        'live_book_pdftohtml_path' => '/usr/bin/pdftohtml',
+        'live_book_pdftk_path' => '/usr/bin/pdftk',
+        'live_book_xml_directory' => 'xml',
+    );
+
+    /**
+     * Installs the plugin.
+     */
+    public function hookInstall()
+    {
+        $this->_options['live_book_custom_library'] = dirname(__FILE__) . DIRECTORY_SEPARATOR . 'libraries' . DIRECTORY_SEPARATOR . 'live_book_custom.php';
+        // TODO Uses and checks archive/cache/live_book folder.
+        $this->_options['live_book_xml_directory'] = dirname(__FILE__) . DIRECTORY_SEPARATOR . 'xml';
+
+        self::_installOptions();
+    }
+
+    /**
+     * Uninstalls the plugin.
+     */
+    public function hookUninstall()
+    {
+        $options = $this->_options;
+        if (!is_array($options)) {
+            return;
+        }
+        foreach ($options as $name => $value) {
+            delete_option($name);
+        }
+    }
+
+    /**
+     * Shows plugin configuration page.
+     */
+    public function hookConfigForm()
+    {
+        include_once 'config_form.php';
+        // TODO Include options of specific libraries too.
+    }
+
+    /**
+     * Processes the configuration form.
+     */
+    public function hookConfig($post)
+    {
+        set_option('live_book_custom_library', $post['live_book_custom_library']);
+        set_option('live_book_zoomify', (boolean) $post['live_book_zoomify']);
+        // TODO Add this configuraiton option.
+        // set_option('live_book_thumbnails_by_view', $post['live_book_thumbnails_by_view']);
+        // TODO To be moved to specific libraries.
+        set_option('live_book_pdftohtml_path', $post['live_book_pdftohtml_path']);
+        set_option('live_book_pdftk_path', $post['live_book_pdftk_path']);
+        set_option('live_book_xml_directory', $post['live_book_xml_directory']);
+    }
+
+    /**
+     * Add css and js in the header of the theme.
+     */
+    public function hookAdminThemeHeader($request)
+    {
+        if ($request->getControllerName() == 'items' && $request->getActionName() == 'show') {
+            queue_css('live_book');
+            // Little differences in the admin css.
+            queue_css('live_book_admin');
+
+            // No tabs effect for admin view.
+        }
+    }
+
+    /**
+     * Add css and js in the header of the theme.
+     */
+    public function hookPublicThemeHeader($request)
+    {
+        if ($request->getControllerName() == 'items' && $request->getActionName() == 'show') {
+            queue_css('live_book');
+
+            // Add tabs effect.
+            queue_css('jquery-ui', 'all', FALSE, 'css/ui');
+            queue_js(array(
+                'jquery.min',
+                'jquery.ui.core.min',
+                'jquery.ui.widget.min',
+                'jquery.ui.tabs.min',
+                'jquery.ui.document_ready',
+            ));
+        }
+    }
+
+    /**
+     * Append the viewer to the admin view.
+     *
+     * Note: Currently, you should replace the call to display_files_for_item()
+     * in the admin theme (admin/themes/default/items/show.php) by the call to
+     * this function (or live_book_admin_append_to_item()).
+     *
+     * @todo Replace display_files_for_item automatically (or wait for a hook on
+     * display_files_for_item()).
+     */
+    public function hookAdminAppendToItemsShowPrimary($item = NULL)
+    {
+        return self::hookPublicAppendToItem($item);
+    }
+
+    /**
+     * Fonction principale du plugin.
+     */
+    public function hookPublicAppendToItem($item = NULL)
+    {
+        if ($item == NULL) {
+            $item = get_current_item();
+        }
+
+        // Initialize return.
+        $html = '<div id="view">';
+
+        // Get images files attached to the item.
+        $imagesFiles = self::get_images_files($item);
+
+        // Avertissement si pas d'image, sinon traitement.
+        if (empty($imagesFiles)) {
+            $html .= '<div id="item-images">' . PHP_EOL;
+            $html .= '<br />' . PHP_EOL;
+            $html .= __("No picture.") . '<br />' . PHP_EOL;
+            $html .= '<br />' . PHP_EOL;
+            $html .= '</div>' . PHP_EOL;
+            $html .= '</div>' . PHP_EOL;
+
+            return $html;
+        }
+
+        // Current image.
+        $currentImage = ($_GET['image'] == true) ? $_GET['image'] : 1;
+        // Si utilisateur a recherché une page.
+        $pageToFind = trim($_GET['find_page']);
+        $foundPage = '';
+        // Vignettage actif ou non.
+        $thumbnailing = $_GET['v'];
+
+        // Define some variables according to type of display.
+        // Page view.
+        if ($thumbnailing != '1') {
+            $thumbnailing = '0';
+
+            // Si l'utilisateur a cherché une page
+            if ($pageToFind) {
+                $foundPage = LiveBook::find_page($pageToFind, $imagesFiles);
+                if ($foundPage) {
+                    $currentImage = $foundPage;
+                }
+            }
+
+            // Détermination des références pour la toolbar.
+            $firstImage = 1;
+            $lastImage = count($imagesFiles);
+            $prevImage = ($currentImage <= $firstImage) ? '' : $currentImage - 1;
+            $nextImage = ($currentImage >= $lastImage) ? '' : $currentImage + 1;
+            $labelPage = LiveBook::get_label_page($imagesFiles[$currentImage]);
+        }
+
+        // Thumbnailing.
+        else {
+            // TODO Add width, height and automatic parameters.
+            list($thumbnailsColumns, $thumbnailsRows) = explode('x', get_option('live_book_thumbnails_by_view'));
+            $thumbnailsByPage = $thumbnailsColumns * $thumbnailsRows;
+
+            $thumbnails = '';
+            $shiftImage = 0;
+            for ($row = 0; $row < $thumbnailsRows; $row++) {
+                $thumbnails .= '<ul class="row">' . PHP_EOL;
+                for ($i = $currentImage + $shiftImage; ($i < $currentImage + $shiftImage + $thumbnailsColumns) and ($i <= count($imagesFiles)); $i++) {
+                    $labelPage = LiveBook::get_label_page($imagesFiles[$i]);
+                    $thumbnails .= '<li class="Object"><span class="numero">' . $labelPage . '</span><br />' . PHP_EOL;
+                    $thumbnails .= '<a class="vignette" href="?image=' . $i . '#live_book">';
+                    $thumbnails .= '<div id="imgitem"><img src="' . WEB_THUMBNAILS . '/' . $imagesFiles[$i]->archive_filename . '" alt="image-' . $i . '" class="object-representation" title="' . __('View this page') . '" /></div>';
+                    $thumbnails .= '</a></li>' . PHP_EOL;
+                }
+                $thumbnails .= '</ul>' . PHP_EOL;
+
+                $shiftImage = $shiftImage + $thumbnailsColumns;
+            }
+
+            // Détermination des références pour la toolbar.
+            $firstImage = 1;
+            $lastImage = count($imagesFiles);
+            $prevImage = ($currentImage <= $firstImage) ? '' : $currentImage - $thumbnailsByPage;
+            if ($prevImage !== '' && $prevImage < $firstImage) {
+                $prevImage = $firstImage;
+            }
+            $nextImage = ($currentImage >= $lastImage - $thumbnailsByPage) ? '' : $currentImage + $thumbnailsByPage;
+            if ($nextImage !== '' && $nextImage > $lastImage) {
+                $nextImage = $lastImage;
+            }
+        }
+
+        // Prépare la barre d'outils.
+        // Partie gauche de la barre : Page précédente
+        if ($prevImage !== '') {
+            // vers la premère page
+            $firstPage = '<a id="premiere" href="?image=' . $firstImage . '&amp;v=' . $thumbnailing . '#live_book" title="' . __('First page') . '" rev="start"></a>';
+            // page précédente (bouton barre de navigation)
+            $prevPage = '<a id="precedente" href="?image=' . $prevImage . '&amp;v=' . $thumbnailing . '#live_book"  title="' . __('Previous page') . '" rel="prev"></a>';
+            // page précédente (survol sur l'image)
+            $prevHover = '<a id="prev" href="?image=' . $prevImage . '&amp;v=' . $thumbnailing . '#live_book" title="' . __('Previous page') . '" ></a>';
+        }
+        // Si pas de page précédente
+        else {
+            $firstPage = '<a class="blankG"></a>';
+            $prevPage = '<a class="blankG"></a>';
+            $prevHover = '';
+        }
+
+        // Partie droite de la barre : Page suivante
+        if ($nextImage !== '') {
+            // dernière page
+            $lastPage = '<a id="derniere" href="?image=' . $lastImage . '&amp;v=' . $thumbnailing . '#live_book" title="' . __('Last page') . '" rev="end"></a>';
+            // page suivante (bouton)
+            $nextPage = '<a id="suivante" href="?image=' . $nextImage . '&amp;v=' . $thumbnailing . '#live_book" title="' . __('Next page') . '" rel="next"></a>';
+            // page suivante (survol sur l'image)
+            $nextHover = '<a id="next" href="?image=' . $nextImage . '&amp;v=' . $thumbnailing . '#live_book" title="' . __('Next page') . '"></a>';
+        }
+        // Si pas de page suivante
+        else {
+            $lastPage = '<a class="blank"></a>';
+            $nextPage = '<a class="blank"></a>';
+            $nextHover = '';
+        }
+
+        // Si vue simple, on active la loupe.
+        if ($thumbnailing != '1') {
+            // Calcul de l'icone et du lien pour le "zoom".
+            // Loupe activée.
+            // $magnifier = self::get_icon('magnifier');
+            $zoomIcon = '<a class="blankL"></a>';
+
+            $zoom = '<div><div class="item-file image-jpeg">';
+            $zoom .= '<a class="fancyitem" href="' . WEB_FILES . '/' . $imagesFiles[$currentImage]->archive_filename . '" title="' . $labelPage . '" rel="fancy_group">';
+            $zoom .= '<img class="page_num" src="' . WEB_FULLSIZE . '/' . $imagesFiles[$currentImage]->archive_filename . '" alt="' . $labelPage . '" title="' . $labelPage . '" />';
+            $zoom .= '</a></div></div>' . PHP_EOL;
+
+            // Prépare la vue simple.
+            $img = '<div id="pagprev">' . $prevHover . '</div>' . PHP_EOL;
+            $img .= $zoom;
+            $img .= '<div id="pagnext">' . $nextHover . '</div>' . PHP_EOL;
+        }
+
+        // Si vignettes, on désactive la loupe.
+        else {
+            // Loupe désactivée.
+            // $magnifier_off = self::get_icon('magnifier_off');
+            $zoomIcon = '<a class="blankL"></a>';
+        }
+
+        // Préparation du mini champ de recherche par page.
+        $form = '<form class="ouvnum" action="#live_book" method="get" name="page">';
+        $form .= '<p>' . __('Page') . ' ';
+        $form .= '<input class="outil" type="text" name="find_page" value="' . ($pageToFind ?: '') . '" size="3" maxlength="10">';
+        $form .= '</p></form>';
+
+        // Lien vers l'image courante.
+        $vign1 = '<a href="?image=' . $currentImage . '&amp;v=1#live_book" title="Affichage vignettes" id="vign1"></a>';
+
+        // Prépare la barre d'outils.
+        $toolbar .= '<div id="live_book">' . PHP_EOL;
+        $toolbar .= '<div id="tools">' . PHP_EOL;
+        $toolbar .= $firstPage;
+        $toolbar .= $prevPage;
+        $toolbar .= $zoomIcon;
+        $toolbar .= $form;
+        $toolbar .= $vign1;
+        $toolbar .= $nextPage;
+        $toolbar .= $lastPage;
+        $toolbar .= '</div>' . PHP_EOL;
+        $toolbar .= '</div>' . PHP_EOL;
+
+        // Fonction Zoomify pour les items avec une seule image
+        // Si Item ne possède qu'une seule image, on afffcihe fonction Zoomify
+        // L'image doit au préalable avoir été traitée avec Zoomify.
+        if (count($imagesFiles) == 1 && get_option('live_book_zoomify')) {
+            while (loop_files_for_item($item)) {
+                $file = get_current_file();
+                if ($file->hasThumbnail()) {
+                    //Création du tableau
+                    $imgZoom = $file->original_filename;
+                    $imgZoom = preg_replace('#.jpg#', '', $imgZoom);
+                }
+                $i++;
+            }
+
+            //lien vers répertoire zoomify
+            $ZoomRep = CURRENT_BASE_URL .'/archive/zoomify';
+            $html .= '<div align="center">' . PHP_EOL;
+            $html .= '<object classid="clsid:D27CDB6E-AE6D-11cf-96B8-444553540000" CODEBASE="http://download.macromedia.com/pub/shockwave/cabs/flash/swflash.cab#version=6,0,40,0" width="550" height="450" id="theMovie">' . PHP_EOL;
+            $html .= '<param name="flashvars" value="zoomifyImagePath=' . $ZoomRep . '/' . $imgZoom . '">' . PHP_EOL;
+            $html .= '<param name="menu" value="false">' . PHP_EOL;
+            $html .= '<param name="src" value="' . $ZoomRep . '/ZoomifyViewer.swf">' . PHP_EOL;
+            $html .= '<embed flashvars="zoomifyImagePath=' . $ZoomRep . '/' . $imgZoom . '" src="' . $ZoomRep . '/ZoomifyViewer.swf" menu="false" pluginspage="http://www.macromedia.com/shockwave/download/index.cgi?p1_prod_version=shockwaveflash" width="550" height="450" name="themovie"></embed>' . PHP_EOL;
+            $html .= '</object>' . PHP_EOL;
+            $html .= '</div>' . PHP_EOL;
+        }
+
+        // Notice avec plusieurs images.
+        else {
+            // Affichage de la barre de navigation et de la page.
+            $html .= '<div id="item-images">' . PHP_EOL;
+            $html .= $toolbar;
+
+            // Affichage de la page.
+            if ($thumbnailing != '1') {
+                $html .= '<div id="numero">[' . $labelPage . ']</div>' . PHP_EOL;
+                $html .= '<div id="main_page">' . $img . '</div>' . PHP_EOL;
+            }
+            // Affichage des vues miniatures.
+            else {
+                $html .= '<div id="vignettes">' . PHP_EOL;
+                $html .= '<div id="pagprev">' . $prevHover . '</div>' . PHP_EOL;
+                $html .= $thumbnails;
+                $html .= '<div id="pagnext">' . $nextHover . '</div>' . PHP_EOL;
+                $html .= '</div>' . PHP_EOL;
+            }
+
+            $html .= $toolbar;
+            $html .= '</div>' . PHP_EOL;
+            $html .= '</div>' . PHP_EOL;
+        }
+
+        // Return html code of live book viewer.
+        return $html;
+    }
+
+    /**
+     * Get the table of content of an itemn, if any.
+     */
+    public static function tableOfContent($item = null)
+    {
+        if ($item == null) {
+            $item = get_current_item();
+        }
+
+        return LiveBook::get_table_of_content($item);
+    }
+
+    /**
+     * Allows to search something in the current document.
+     */
+    public static function searchContent($item = null)
+    {
+        if ($item == null) {
+            $item = get_current_item();
+        }
+
+        $html = '';
+        $maxResults = 100;
+
+        if (!LiveBook::has_text($item)) {
+            return $html;
+        }
+
+        $html .= '<div id="search_content">';
+
+        // Local search form.
+        $html .= '<div id="search-ti">' . PHP_EOL;
+        $html .= '    <h2>' . __('Search inside this document') . '</h2>' . PHP_EOL;
+        $html .= '    <form action="#search_content" method="post">' . PHP_EOL;
+        $html .= '        <input type="hidden" name="action" value="seek">' . PHP_EOL;
+        $html .= '        <input class="search" type="text" name="words_to_search" size=35 maxlength=100 value="">' . PHP_EOL;
+        $html .= '        <input type="submit" value="ok" id="submit_search">' . PHP_EOL;
+        $html .= '    </form>' . PHP_EOL;
+        $html .= '</div>' . PHP_EOL;
+        $keywords = trim($_POST['words_to_search']);
+
+        if (empty($keywords)) {
+            $html .= '</div>' . PHP_EOL;
+            return $html;
+        }
+
+        $html .= '<div id="vtext">';
+
+        $results = LiveBook::search_text($keywords, $item, $maxResults);
+
+        $countResults = count($results);
+        $html .= '<strong><em>';
+        if ($countResults == 0) {
+            $html .= __('"%s" appears nowhere in the document.', $keywords);
+            $html .= '</em></strong>';
+            $html .= '</div>' . PHP_EOL;
+            $html .= '</div>' . PHP_EOL;
+            return $html;
+        }
+        elseif ($countResults == 1) {
+            $html .= __('"%s" appears in one page:', $keywords);
+        }
+        elseif ($countResults < $maxResults) {
+            $html .= __('"%s" appears in %d pages:', $keywords, $countResults);
+        }
+        else {
+            $html .= __('"%s" appears in more than %d pages:', $keywords, $countResults);
+        }
+        $html .= '</em></strong><br />' . PHP_EOL;
+
+        // Prepare list of files and a mapping between image numbers and ids.
+        $imagesFiles = self::get_images_files($item);
+        $imagesMap = array();
+        foreach ($imagesFiles as $key => $file) {
+            $imagesMap[$file->id] = $key;
+        }
+
+        // Display found text of all pages where there is a result.
+        // TODO Display with multipage. Currently, use simply a max.
+        foreach ($results as $file_id => $textPage) {
+            $currentImage = $imagesMap[$file_id];
+
+            $labelPage = LiveBook::get_label_page($imagesFiles[$currentImage]);
+            $textPage = htmlspecialchars($textPage, ENT_COMPAT | ENT_HTML401 | ENT_DISALLOWED, 'UTF-8');
+
+            $html .= '<a href="?image=' . $currentImage . '#live_book">' . $labelPage . '</a> : ' . PHP_EOL;
+            $html .= self::highlight($keywords, $textPage) . '<br />' . PHP_EOL;
+        }
+
+        if ($countResults > $maxResults) {
+            $html .= '<strong><em>' . __('Too many results. Next ones are hidden.') . '</em></strong>';
+        }
+
+        $html .= '</div>' . PHP_EOL;
+        $html .= '</div>' . PHP_EOL;
+
+        return $html;
+    }
+
+    /**
+     * Highlights the selected text.
+     *
+     * This function is used to show the results of the local search engine.
+     *
+     */
+    public static function highlight($textToHighlight, $text)
+    {
+        $search = preg_quote($textToHighlight);
+        $match = self::regex_accents($search);
+        // Results come from mysql "like" and don't manage words boundaries,
+        // so we don't use the '\b' regex around text to highlight.
+        return preg_replace('/' . $match . '/iu', '<span class="highlight">$0</span>', $text);
+    }
+
+    /**
+     * Clean a string.
+     *
+     * @todo Use a more generic function (utf8 can manage diacritics with mb).
+     */
+    public static function regex_accents($string)
+    {
+        $accent = array(
+            'a', 'à', 'á', 'â', 'ã', 'ä', 'å',
+            'c', 'ç',
+            'e', 'è', 'é', 'ê', 'ë',
+            'i', 'ì', 'í', 'î', 'ï',
+            'o', 'ð', 'ò', 'ó', 'ô', 'õ', 'ö',
+            'u', 'ù', 'ú', 'û', 'ü',
+            'y', 'ý', 'ý', 'ÿ',
+        );
+
+        $inter = array('%01', '%02', '%03', '%04', '%05', '%06', '%07', '%08', '%09', '%10', '%11', '%12', '%13', '%14', '%15', '%16', '%17', '%18', '%19', '%20', '%21', '%22', '%23', '%24', '%25', '%26', '%27', '%28', '%29', '%30', '%31', '%32', '%33', '%34', '%35');
+
+        $regex = array(
+            '(a|à|á|â|ã|ä|å)', '(a|à|á|â|ã|ä|å)', '(a|à|á|â|ã|ä|å)', '(a|à|á|â|ã|ä|å)', '(a|à|á|â|ã|ä|å)', '(a|à|á|â|ã|ä|å)', '(a|à|á|â|ã|ä|å)',
+            '(c|ç)', '(c|ç)',
+            '(è|e|é|ê|ë)', '(è|e|é|ê|ë)', '(è|e|é|ê|ë)', '(è|e|é|ê|ë)', '(è|e|é|ê|ë)',
+            '(i|ì|í|î|ï)', '(i|ì|í|î|ï)', '(i|ì|í|î|ï)', '(i|ì|í|î|ï)', '(i|ì|í|î|ï)',
+            '(o|ð|ò|ó|ô|õ|ö)', '(o|ð|ò|ó|ô|õ|ö)', '(o|ð|ò|ó|ô|õ|ö)', '(o|ð|ò|ó|ô|õ|ö)', '(o|ð|ò|ó|ô|õ|ö)', '(o|ð|ò|ó|ô|õ|ö)', '(o|ð|ò|ó|ô|õ|ö)',
+            '(u|ù|ú|û|ü)', '(u|ù|ú|û|ü)', '(u|ù|ú|û|ü)', '(u|ù|ú|û|ü)',
+            '(y|ý|ý|ÿ)', '(y|ý|ý|ÿ)', '(y|ý|ý|ÿ)', '(y|ý|ý|ÿ)',
+        );
+
+        $string = str_ireplace($accent, $inter, $string);
+        $string = str_replace($inter, $regex, $string);
+
+        return $string;
+    }
+
+    /**
+     * Return list of images files of an item.
+     *
+     * @param Item $item
+     *
+     * @return array
+     *   Return ordered array of images files, numbered from 1 (first image).
+     */
+    private static function get_images_files($item)
+    {
+        $imagesFiles = $item->Files;
+        foreach ($imagesFiles as $key => $value) {
+            if (!$value->hasThumbnail()) {
+                $imagesFiles[$key] = null;
+            }
+        }
+        $imagesFiles = array_values(array_filter($imagesFiles));
+        // Start array at 1 to simplify the count of items and avoid errors.
+        array_unshift($imagesFiles, true);
+        unset($imagesFiles[0]);
+
+        return $imagesFiles;
+    }
+
+    private static function get_icon($file)
+    {
+        $imgURL = WEB_PLUGIN . '/LiveBook/views/shared/images/' . $file . '.png';
+        return '<img src="' . $imgURL  . '">' . PHP_EOL;
+    }
+}
+
+/** Installation of the plugin. */
+$liveBook = new LiveBookPlugin();
+$liveBook->setUp();
+
+/**
+ * Wrapper called by theme.
+ *
+ * @note Currently, you should replace the call to display_files_for_item()
+ * in the admin theme (default is admin/themes/default/items/show.php) by the
+ * call to this function.
+ *
+ * @todo Replace automatically admin call to display_files_for_item().
+ */
+function live_book_admin_append_to_item($item = NULL) {
+    $liveBook = new LiveBookPlugin();
+    return $liveBook->hookAdminAppendToItemsShowPrimary($item);
 }
 
 /**
-* Processes the configuration form.
-*/
-function bibnum_config()
-{
-	set_option('bibnum_pdftohtml_path', $_POST['bibnum_pdftohtml_path']);
-	set_option('bibnum_pdftk_path', $_POST['bibnum_pdftk_path']);
-	set_option('bibnum_xml_directory', $_POST['bibnum_xml_directory']);
+ * Wrapper called by theme.
+ */
+function live_book_append_to_item($item = NULL) {
+    $liveBook = new LiveBookPlugin();
+    return $liveBook->hookPublicAppendToItem($item);
 }
-
-
-//fonction qui va permettre, à l'aide d'expressions régulières, de récupérer le "libellé de la page " en fonction du nom de fichier
-//A modifier en fonction de votre système de nommage
-function label_page($txt) 
-{
-	$re1='.*?';	# Non-greedy match on filler
-	$re2='(page)';	# Word 1
-	$re3='(\\d+)';	# Integer Number 1
-	if ($c=preg_match_all ("/".$re1.$re2.$re3."/is", $txt, $matches))
-	{
-		$word1=$matches[1][0];
-		$int1=$matches[2][0];
-		$int1 = preg_replace( "/^[0]{0,6}/", "", $int1 );  
-		return ucwords($word1)." ". $int1 ;
-	}
-	  $re1='.*?';	# Non-greedy match on filler
-	  $re2='((?:[a-z][a-z]+))';	# Word 1
-	  $re3='(.)';	# Any Single Character 1
-	  $re4='((?:[a-z][a-z]+))';	# Word 2
-
-	  if ($c=preg_match_all ("/".$re1.$re2.$re3.$re4."/is", $txt, $matches))
-	  {
-	 
-		$word1=$matches[1][0];
-		$c1=$matches[2][0];
-		$word2=$matches[3][0];
-		return  ucwords($word1.$c1.$word2);
-	}
-
-}
-
-function regexAccents($chaine) {
-	$accent = array('a','à','á','â','ã','ä','å','c','ç','e','è','é','ê','ë','i','ì','í','î','ï','o','ð','ò','ó','ô','õ','ö','u','ù','ú','û','ü','y','ý','ý','ÿ');
-	$inter = array('%01','%02','%03','%04','%05','%06','%07','%08','%09','%10','%11','%12','%13','%14','%15','%16','%17','%18','%19','%20','%21','%22','%23','%24','%25','%26','%27','%28','%29','%30','%31','%32','%33','%34','%35');
-	$regex = array('(a|à|á|â|ã|ä|å)','(a|à|á|â|ã|ä|å)','(a|à|á|â|ã|ä|å)','(a|à|á|â|ã|ä|å)','(a|à|á|â|ã|ä|å)','(a|à|á|â|ã|ä|å)','(a|à|á|â|ã|ä|å)',
-		'(c|ç)','(c|ç)',
-		'(è|e|é|ê|ë)','(è|e|é|ê|ë)','(è|e|é|ê|ë)','(è|e|é|ê|ë)','(è|e|é|ê|ë)',
-		'(i|ì|í|î|ï)','(i|ì|í|î|ï)','(i|ì|í|î|ï)','(i|ì|í|î|ï)','(i|ì|í|î|ï)',   '(o|ð|ò|ó|ô|õ|ö)','(o|ð|ò|ó|ô|õ|ö)','(o|ð|ò|ó|ô|õ|ö)','(o|ð|ò|ó|ô|õ|ö)','(o|ð|ò|ó|ô|õ|ö)','(o|ð|ò|ó|ô|õ|ö)','(o|ð|ò|ó|ô|õ|ö)',         '(u|ù|ú|û|ü)','(u|ù|ú|û|ü)','(u|ù|ú|û|ü)','(u|ù|ú|û|ü)',
-		'(y|ý|ý|ÿ)','(y|ý|ý|ÿ)','(y|ý|ý|ÿ)','(y|ý|ý|ÿ)');
-	$chaine = str_ireplace($accent, $inter, $chaine);
-	$chaine = str_replace($inter, $regex, $chaine);      
-	return $chaine;
-};
-
-
-//fonction de surlignage d'un texte
-function highlight($mots,$chaine)
-	//met en gras les mots cles pour les resultats du moteur de recherche
-{ return eregi_replace($mots,"<span class='highlight'>\\0</span>",$chaine); }   
 
 /**
-* Returns HTML code to embed a shared css file of the plugin
-*  Note: If the controller's module is that of another plugin, 
-*  then the js() and css() functions will not find this plugin's javascripts or css files.
-*  This is a bug. Until this bug is fixed we must use image_annotation_js and image_annotation_css
-* 
-* @param string $file The name of the css file without the extension.
-* @param string $themeType The type of theme ('public', 'admin', or 'shared')
-* @return string The HTML code to embed a shared css file of the plugin
-*/
-
-function bibnum_css($file, $themeType='public')
-{
-	$cssURL = WEB_PLUGIN . '/bibnum/views/' . $themeType . '/css/' . $file . '.css';
-	echo '<link rel="stylesheet" media="screen" href="' . $cssURL . '" />'."\n";
+ * Wrapper called by theme.
+ */
+function live_book_tableOfContent($item = NULL) {
+    $liveBook = new LiveBookPlugin();
+    return $liveBook->tableOfContent($item);
 }
-
-function bibnum_img($file) 
-{
-	$imgURL = WEB_PLUGIN . '/bibnum/views/public/images/' . $file . '.png';
-	return '<img src="'. $imgURL  .'"/>'."\n";
-}
-
 
 /**
-* Returns HTML code to embed a shared javascript file of the plugin
-*  Note: If the controller's module is that of another plugin, 
-*  then the js() and css() functions will not find this plugin's javascripts or css files.
-*  This is a bug. Until this bug is fixed we must use image_annotation_js and image_annotation_css
-* 
-* @param string $file The name of the javascript file without the extension. 
-* @return string The HTML code to embed a shared javascript file of the plugin
-*/
-function bibnum_js($file) 
-{
-	$jsURL = WEB_PLUGIN . '/bibnum/shared/javascripts/' . $file . '.js';
-	return '<script type="text/javascript" src="'. $jsURL  .'" charset="utf-8"></script>'."\n";
+ * Wrapper called by theme.
+ */
+function live_book_searchContent($item = NULL) {
+    $liveBook = new LiveBookPlugin();
+    return $liveBook->searchContent($item);
 }
-
-function bibnum_javascripts()
-{
-	$html = '';
-	//lien vers javascript pour le zoom sur les images (utilisation de la librairie TJPZoom)
-	//$html .= bibnum_js('tjpzoom');
-	//$html .= bibnum_js('tjpzoom_config_purity');     
-	return $html;
-}  
-
-/**
-Patch suite v1.3 récupère nom du fichier archivé
-*/
-function findFilePath ($image){
-	$db = get_db();
-	$query = $db->select()->from(array($db->Files), 'archive_filename')->where('original_filename = ?', $image);
-	return $db->fetchOne($query);  }
-
-
-	function vignette($listing)	{
-		$vignette=$listing[$i];
-		$page=$vignette;
-		$page=label_page($page);
-
-		if ($vignette!="")
-		{
-			$vignette = findFilePath($vignette);
-			$vignettes.="<li class=\"Object\"><span class='numero'>$page</span><br/>\n";
-			$vignettes.="<a class='vignette' href=\"?image=$i#bibnum\"><img src=\"$thumb/$vignette\"  alt=\"image-".$i."\" class=\"object-representation\" title=\"consulter cette page\"/></a><br /></li>\n";
-		} 
-		echo $vignettes;
-	} 
-
-/**
-Fonction principale du plugin, celle qui sera appelée dans le thème
-*/
-function bibnum_append_to_item()
-{
-
-	//création d'un tableau composé de l'ensemble des images de l'item consulté
-	$listing= array();
-	$i=0;
-
-	while(loop_files_for_item($item)) {    	 
-		$file = get_current_file();
-		if ($file->hasThumbnail()) {			
-			//$listing[$i]=$file->archive_filename;//Création du tableau
-			$listing[$i]=item_file('Original Filename');
-
-		}
-		$i++;
-	}
-	//compte le nb d'imgages dans le tableau
-	$nbimg = count($listing); 
-
-	// DESSOUS : si $listing n'est pas un tableau, message, sinon, traitement
-	if(!is_array($listing))
-	{
-		$html .="<br><br>\n";
-		$html .= "problème :-( <br><br>\n";
-		$html .= "</a>\n";
-		$html .= "</div>\n";
-	}
-	else
-	{    	
-		// TRI DE LA LISTE DES FICHIERS
-		sort($listing); 	
-	}
-
-
-	$id=item('Id');//id de l'ouvrage
-	$find_page=$_GET['find_page'];// si utilisateur a recherché une page
-	$image=$_GET['image'];// si image courante (au niveau de l'url)
-	$v=$_GET['v'];	// vignettage actif
-	$permaRep = CURRENT_BASE_URL .'/files/display';
-	$rep= WEB_FULLSIZE ;//répertoire dans lequel se trouvent les images de grande taille
-	$thumb= WEB_THUMBNAILS ;// répertoire des vignettes
-	$files=WEB_FILES ;// répertoire des images originales
-
-	if($_GET['image']==true){
-		$image=$_GET['image'];
-		$image = $listing[$image];		
-	}
-	else
-	{
-		$image = $listing[0];			
-	}
-
-
-	// LISTING DE TOUTES LES IMAGES DANS LE REPERTOIRE POUR VIGNETTAGE	
-	if ($v=="1") {	
-		// on cherche l'image courante dans le tableau et on récupère sa position	
-		$imageCourante = array_search($image, $listing);	
-		// on calcule les postions des photos précédentes et suivantes, debut et fin
-		//Il y a 35 vues par page dans la fonction vignettage
-
-		//page précédente	    
-		if (($imageCourante < 35)&&($imageCourante!=0))
-		{		
-			$precedent=0;		
-			$prec='1';
-		}
-		else 
-		{	
-			$prec = $imageCourante - 35;
-			$precedent=$prec;
-			$prec=($prec+1);
-		}	
-		if ($prec<0){$prec="NULL";}
-
-		//page suivante	
-		$suiv = $imageCourante + 35;
-		$suivant=$listing[$suiv];
-		$suivant = array_search($suivant, $listing);
-		if ($suivant!=""){ $suiv=($suiv+1);}
-		else {$suiv="";}
-
-		$nombre = count($listing);
-
-		$finnb=($nombre-1);	
-		$fin= $listing[$finnb];
-		//page de fin
-		$fin = array_search($fin, $listing);	
-		$debut=0;
-
-		//NBRE de PAGES au total dans le répertoire
-		$nb_pages=$result = count ($listing);
-		
-
-
-		//1ere ligne
-		$vignettes.="<ul class=\"row\">\n";	
-		for($i=$imageCourante;$i<$imageCourante+5;$i++) 
-		{ 
-			$vignette=$listing[$i];
-			$page=$vignette;
-			$page=label_page($page);
-
-			if ($vignette!="")
-			{
-				$vignette = findFilePath($vignette);
-				$vignettes.="<li class=\"Object\"><span class='numero'>$page</span><br/>\n";
-				$vignettes.="<a class='vignette' href=\"?image=$i#bibnum\"><div id=\"imgitem\"><img src=\"$thumb/$vignette\"  alt=\"image-".$i."\" class=\"object-representation\" title=\"consulter cette page\"/></div></a><br /></li>\n";
-			} 
-
-		}
-		$vignettes.="</ul>\n"; 
-
-		//2nde ligne
-		$vignettes.="<ul class=\"row\">\n";	
-		for($i=$imageCourante+5;$i<$imageCourante+10;$i++) 
-		{ 	
-			$vignette=$listing[$i];			
-			$page=$vignette;
-			$page=label_page($page);
-
-			if ($vignette!="")
-			{
-				$vignette = findFilePath($vignette);
-				$vignettes.="<li class=\"Object\"><span class='numero'>$page</span><br/>\n";
-				$vignettes.="<a class='vignette' href=\"?image=$i#bibnum\"><div id=\"imgitem\"><img src=\"$thumb/$vignette\"  alt=\"image-".$i."\" class=\"object-representation\" title=\"consulter cette page\"/></div></a><br /></li>\n";
-			} 
-		}
-		$vignettes.="</ul>\n";  
-
-		//3eme ligne	
-		$vignettes.="<ul class=\"row\">\n";	
-		for($i=$imageCourante+10;$i<$imageCourante+15;$i++) 
-		{ 
-			$vignette=$listing[$i];			
-			$page=$vignette;
-			$page=label_page($page);
-
-			if ($vignette!="")
-			{
-				$vignette = findFilePath($vignette);
-				$vignettes.="<li class=\"Object\"><span class='numero'>$page</span><br/>\n";
-				$vignettes.="<a class='vignette' href=\"?image=$i#bibnum\"><div id=\"imgitem\"><img src=\"$thumb/$vignette\"  alt=\"image-".$i."\" class=\"object-representation\" title=\"consulter cette page\"/></div></a><br /></li>\n";
-			} 
-		}
-		$vignettes.="</ul>\n"; 
-
-		//4eme ligne	
-		$vignettes.="<ul class=\"row\">\n";	
-		for($i=$imageCourante+15;$i<$imageCourante+20;$i++) 
-		{	
-			$vignette=$listing[$i];			
-			$page=$vignette;
-			$page=label_page($page);
-			if ($vignette!="")
-			{
-				$vignette = findFilePath($vignette);	
-				$vignettes.="<li class=\"Object\"><span class='numero'>$page</span><br/>\n";
-				$vignettes.="<a class='vignette' href=\"?image=$i#bibnum\"><div id=\"imgitem\"><img src=\"$thumb/$vignette\"  alt=\"image-".$i."\" class=\"object-representation\" title=\"consulter cette page\"/></div></a></li>\n";
-			} 
-		}
-		$vignettes.="</ul>\n"; 
-
-		//5eme ligne	
-		$vignettes.="<ul class=\"row\">\n";	
-		for($i=$imageCourante+20;$i<$imageCourante+25;$i++) 
-		{ 	
-			$vignette=$listing[$i];
-			//
-			$page=$vignette;
-			$page=label_page($page);
-			if ($vignette!="")
-			{	
-				$vignette = findFilePath($vignette);		
-				$vignettes.="<li class=\"Object\"><span class='numero'>$page</span><br/>\n";
-				$vignettes.="<a class='vignette' href=\"?image=$i#bibnum\"><div id=\"imgitem\"><img src=\"$thumb/$vignette\"  alt=\"image-".$i."\" class=\"object-representation\" title=\"consulter cette page\"/></div></a><br /></li>\n";
-			} 
-		}
-		$vignettes.="</ul>\n";  
-
-		//dernière ligne
-		$vignettes.="<ul class=\"row\">\n";	
-		for($i=$imageCourante+25;$i<$imageCourante+30;$i++) 
-		{ 	
-			$vignette=$listing[$i];		
-			$page=$vignette;
-			$page=label_page($page);
-
-			if ($vignette==true)
-			{
-				$vignette = findFilePath($vignette);
-				$vignettes.="<li class=\"Object\"><span class='numero'>$page</span><br/>\n";
-				$vignettes.="<a class='vignette' href=\"?image=$i#bibnum\"><div id=\"imgitem\"><img src=\"$thumb/$vignette\"  alt=\"image-".$i."\" class=\"object-representation\" title=\"consulter cette page\"/></div></a><br /></li>\n";
-			}
-		}
-		$vignettes.="</ul>\n";
-	}//fin du if (vignettage)
-
-	// LISTING DE TOUTES LES IMAGES DANS LE REPERTOIRE POUR AFFICHAGE NORMALE
-	else 
-	{
-		//Si l'utilisateur a cherché une page
-		if ($find_page==true)
-		{ 
-			$find_page= strtolower($find_page); 
-			
-			$re1='.*?';	# Non-greedy match on filler
-			$re2='(page0{0,6}'.$find_page.')';	# Alphanum 1
-			$re3='(\\.)';
-			
-			$match = "/".$re1.$re2.$re3."/is";//récupération du n° de page
-			foreach ($listing as $j => $value) 
-			{
-				if (preg_match($match, $value))
-				{		
-					$find=$j;
-					$image=$listing[$find];//récupération de la vue correspodant au n° de page recherchée
-				}
-				else { echo "";}
-			} 
-		}
-		else{$imageCourante=0;} // si aucune page recherchée, on se positionne sur l'image courante
-
-		//Numéro de la page courante	   
-		$imageCourante = array_search($image, $listing);
-		$imageCourante=($imageCourante+1); 
-
-		//page de début
-		$debut=$listing[0];
-		$debut = array_search($debut, $listing);
-
-
-		//page précédente
-		$prec = ($imageCourante - 1);	
-		if ($prec!=""){$pre=($prec-1);}
-		else {$prec="NULL";}
-		$precedent=$listing[$pre];
-		$precedent = array_search($precedent, $listing);
-
-
-		//page suivante
-		$suiv = ($imageCourante + 1) ;	
-		if ($suiv!=""){$sui=($suiv-1);;}
-		else {$suiv="";}
-		$suivant=$listing[$sui];
-		$suivant = array_search($suivant, $listing);
-
-
-		//NBRE de PAGES au total dans le répertoire
-		$nb_pages=$result = count ($listing);
-
-		//Page de fin
-		$fin=($nb_pages-1);
-		$fin= $listing[$fin]; 
-		$fin= array_search($fin, $listing);
-
-	}
-
-	// TABLEAU EN-TETE Si besoin
-	$keyimg= array_search($image, $listing);
-
-	// TABLEAU EN-TETE Si besoin
-	$tableau1="";
-	//NAVIGATION
-
-	// DESSOUS : calcul des liens sur images navigG/D et navigFinG/D, 
-	if ($prec!="NULL")     // partie gauche de la barre : Page précédente
-	{
-		//vers la premère page
-		$navigFinG="<a rev=\"start\" href=\"?image=$debut&amp;v=$v#bibnum\" title=\"première page\" id=\"premiere\"></a>";
-		//page précédente (bouton barre de navigation)                   	
-		$prec="<a rel=\"prev\" id=\"precedente\" href=\"?image=$precedent&amp;v=$v#bibnum\"  title=\"page précédente\"></a>";
-		//page précédente (survol sur l'image)
-		$prev="<a href='?image=$precedent&amp;v=$v#bibnum' id='prev' title=\"Page précédente\" ></a>";
-	}
-	else
-	{
-		//si pas fr page précédente
-		$navigFinG="<a class=\"blankG\"></a>";                    
-		$prec="<a class=\"blankG\"></a>";
-		$prev="";
-	}
-	if ($suivant!="")// partie droite de la barre : Page suivante
-	{
-		//dernière page
-		$navigFinD="<a href=\"?image=$fin&amp;v=$v#bibnum\"  title=\"dernière page\" id=\"derniere\"></a>";
-		//page suivante (bouton)
-		$suiv="<a rel=\"next\" id=\"suivante\" href=\"?image=$suivant&amp;v=$v#bibnum\" title=\"page suivante\"></a>";
-		//page suivante (survol sur l'image)
-		$next="<a href='?image=$suivant&amp;v=$v#bibnum' id='next' title=\"Page suivante\"></a>";
-
-	}
-	else
-	{
-		//si pas de page suivante
-		$navigFinD="<a class=\"blank\"></a>";                   
-		$suiv="<a class=\"blank\"></a>";
-		$next="";
-	}
-
-	// DESSOUS : calcul de l'icone et du lien pour le "zoom" ; 	
-	//$magnifier = bibnum_img('magnifier');//loupe active
-	//$magnifier_off = bibnum_img('magnifier_off');// loupe désactivée 
-
-	//$zoomP='<a href="#" title="loupe" id="loupe" onclick="if(TJPzoomswitch(document.getElementById(\'imgZ\'))) {this.innerHTML=\'<img src='. WEB_PLUGIN . '/bibnum/views/public/images/magnifier_off.png>\'} else {this.innerHTML=\'<img src='. WEB_PLUGIN . '/bibnum/views/public/images/magnifier.png>\'}; return false;"><img src="'. WEB_PLUGIN . '/bibnum/views/public/images/magnifier.png"></a>';
-
-
-	$page=$image;
-	$page=label_page($page); //nom de la page
-	$image = findFilePath ($image);
-
-
-	//$zoom="<div id='lightbox'><div class='item-file image-jpeg'><a href=\"$files/$image\" title=\"Vue en plein écran\"><img class='page_num' src=\"$rep/$image\"   onmouseover=\"TJPzoomif(this,'$files/$image?adsfg');\" id=\"imgZ\"></a></div></div> ";
-	
-	$zoom="<div><div class='item-file image-jpeg'><a class='fancyitem' href=\"$files/$image\"   title=\"".$page."\" rel=\"fancy_group\"><img class='page_num'   src=\"$rep/$image\" alt=\"".$page."\" title=\"".$page."\" /></a></div></div> ";
-
-
-	//DESSOUS : affiche tableau contenant la barre de navigation	  
-	$FORM="<form class='ouvnum' action=\" \" method=\"get\"> 
-		  <p>Page <input class='outil' type='text' name='find_page' value= '' size='3' maxlength='10'/></p></form>";
-	$VIGN1="<a href=\"?image=$keyimg&amp;v=1#bibnum\" title=\"Affichage vignettes\"  id=\"vign1\" ></a>";
-
-	//affichage vue simple
-	$img.="<div id=\"pagprev\">$prev</div>$zoom<div id=\"pagnext\">$next</div>";
-
-
-	// FONCTION ZOOMIFY Pour les items avec une seule image
-	// Si Item ne possède qu'une seule image, on afffcihe fonction Zoomify (l'image doit au préalable avoir été traitée avec zoomify
-	if($nbimg=="1") 
-	{  	
-		while(loop_files_for_item($item)) 
-		{    	 
-			$file = get_current_file();
-			if ($file->hasThumbnail()) 
-			{
-				$imgZoom=$file->original_filename;//Création du tableau
-				$imgZoom = preg_replace('#.jpg#', '', $imgZoom);
-			}
-			$i++;
-		}	
-		$ZoomRep = CURRENT_BASE_URL .'/archive/zoomify';//lien vers répertoire zoomify	
-		$html.='<div align="center">';
-		$html.="\n";
-		$html.='<object classid="clsid:D27CDB6E-AE6D-11cf-96B8-444553540000" CODEBASE="http://download.macromedia.com/pub/shockwave/cabs/flash/swflash.cab#version=6,0,40,0" WIDTH="550" HEIGHT="450" ID="theMovie">';
-		$html.="\n";
-		$html.='<param name="flashvars" value="zoomifyImagePath='.$ZoomRep.'/'.$imgZoom.'">';
-		$html.="\n";
-		$html.='<param name="menu" value="false">';
-		$html.="\n";
-		$html.='<param name="src" value="'.$ZoomRep.'/ZoomifyViewer.swf">';
-		$html.="\n";
-		$html.='<embed flashvars="zoomifyImagePath='.$ZoomRep.'/'.$imgZoom.'" src="'.$ZoomRep.'/ZoomifyViewer.swf" menu="false" pluginspage="http://www.macromedia.com/shockwave/download/index.cgi?p1_prod_version=shockwaveflash"  width="550" height="450" name="themovie"></embed>';
-		$html.="\n";
-		$html.='</object>';
-		$html.="\n";
-		$html.='</div>';
-	}
-	else 
-	{ 
-		// AFFICHAGE DES TABLEAUX  
-		//on affiche barre de navigation
-		$html.= '<div id="viewer"><div id="item-images">';
-		$toolbar.='<div id="bibnum">';		
-		$toolbar.='<div id="tools">';				
-		$toolbar.= $navigFinG;				
-		$toolbar.= $prec; 
-
-
-		if ($v=="1") {$toolbar.="<a class=\"blankL\"></a>";}//si vignettes, on désactive la loupe
-		else{$toolbar.= "<a class=\"blankL\"></a>";} //$zoomp
-		$toolbar.= $FORM; 
-		$toolbar.= $VIGN1;
-		$toolbar.= $suiv; 				
-		$toolbar.= $navigFinD; 
-		$toolbar.='</div>';			
-		$toolbar.='</div>';	
-		$html.=$toolbar;	
-
-		//si fonction vignettage activée, on affiche les vues miniatures
-		if ($v=="1") 
-		{
-			$html.= "<div id=\"vignettes\" ><div id=\"pagprev\">$prev</div>$vignettes<div id=\"pagnext\">$next</div></div>";
-		}
-		else 
-		{
-
-
-
-			$html.="<div id='numero'><b>".$page."</b></div>";//numéro de la page
-			$html.= "<div id=\"main_page\" >$img</div>";				
-		}	
-		$html.=$toolbar;
-		$html.= '</div></div>';	
-
-	}  
-	return $html ;//on affiche l'ensemble
-}
-
-
-
-//Fonction permettant de récupérer la table des matière d'un PDF
-function bibnum_tableOfContent($item=null) 
-{	
-	if ($item == null) 
-	{
-		$item = get_current_item();//si null, récupère l'item actuellement consulté
-	}	
-
-	//création condition : fichier est un pdf
-	$SupportedFormats = array('pdf' => 'Portable Document Format File',);
-	// Set the regular expression to match selected/supported formats.
-	$supportedFormatRegEx = '/\.'.implode('|', array_keys($SupportedFormats)).'$/';
-	$i = 1;
-
-
-	// Iterate through the item's files afin de récupérer le fichier pdf de l'ouvrage
-	while(loop_files_for_item($item)) 
-	{
-		$file = get_current_file();
-		// Embed only those files that end with the selected/supported formats.
-		if (preg_match($supportedFormatRegEx, $file->archive_filename)) 
-		{                
-			// Set the document's absolute URL.
-			// Note: file_download_uri($file) does not work here. It results 
-			// in the iPaper error: "Unable to reach provided URL."
-			$documentUrl = WEB_FILES . DIRECTORY_SEPARATOR . $file->archive_filename;			
-			$documentfile = FILES_DIR. DIRECTORY_SEPARATOR .$file->archive_filename; 
-			$namexml = $item->id;
-			$output = BIBNUM_XML_DIRECTORY . DIRECTORY_SEPARATOR . $namexml;
-			$source = $output.'.xml'; //préparation de la sortie en xml			
-
-			//si le fichier n'existe pas déjà, création du fichier xml comprenant l'ocr du PDF
-			//nécessite l'installation de la librairie pdftohtml (poppler-utils)
-			if (file_exists($source)) {} 
-			else 
-			{
-				exec("". BIBNUM_PDFTOHTML ." -xml -hidden $documentfile $output", $retour);		 
-
-			}				
-			$report = $output.'.txt'; //préparation sortie report.txt
-			//si le fichier n'existe pas déjà, création du fichier txt comprenant les métadonnées et bookmarks du PDF
-			//nécessite l'installation de la librairie pdftohtml (poppler-utils)		
-			if (file_exists($report)) {} 
-			else 
-			{		
-				exec("". BIBNUM_PDFTK ." $documentUrl dumpdata output $report", $return);
-			}		 
-
-			//Création de la table des matières
-			$pdftoc =array();
-			$BookmarkTitle = '#BookmarkTitle: #'; //pr repérer les libellés des bookmarks
-			$BookmarkLevel = '#BookmarkLevel: #'; //pr repérer le niveau des bookmarks
-			$BookmarkPageNumber = '#BookmarkPageNumber: #';//pour repérer le numéro de page du bookmark
-			//initialisation des tableaux (libellés, niveaux et numéros de page)
-			$btitle=array();
-			$level=array();
-			$pgnb=array();
-			$trimmed = file("$report", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES); 
-
-			foreach ($trimmed as $j => $value) 
-			{	 	
-				if (preg_match($BookmarkTitle, $value)) 
-				{
-					$valtit = preg_replace($BookmarkTitle, '', $value);
-					$btitle[$j]=$valtit;			
-				}
-				else {}
-
-				if (preg_match($BookmarkLevel, $value)) 
-				{
-					$valev = preg_replace($BookmarkLevel, '', $value);
-					$k = ($j-1);
-					$level[$k]=$valev;			
-				}
-				else {}
-
-				if (preg_match($BookmarkPageNumber, $value)) {
-					$valpg = preg_replace($BookmarkPageNumber, '', $value);
-					$l = ($j-2);
-					$pgnb[$l]=$valpg;			
-				}
-				else {}
-			}
-			//préparation de la table des matières
-			$toc.= '<div class="toc">';		
-			foreach ($btitle as $j => $val) 
-			{
-				if ($level[$j]>3){}
-				//zappe certains bookmarks inutiles
-				elseif (preg_match('#(page|garde|Garde|Page)#', $val)) {}
-				else{$toc.='<div class="toc_section'.$level[$j].'">';
-				$nb=($pgnb[$j]-1);
-				$toc.= '<a HREF="?image='.$nb.'">';
-				$toc.= $val.'</a></div>';}
-			}
-			$i++;
-		}
-	}
-	//on affiche le résultat
-	$toc.= '</div>';
-	return $toc ;
-}
-
-
-//Fonction permettant de rechercher dans le fichier xml généré à partir de l'ocr du PDF
-function bibnum_searchContent($item=null) { 
-
-
-	//si null, récupère l'item actuellement consulté
-	if ($item == null)
-	{
-		$item = get_current_item();
-	}
-	//récupération du fichier xml à traiter en fonction de l'id de l'item
-	$namexml = $item->id; 
-	$output = BIBNUM_XML_DIRECTORY . DIRECTORY_SEPARATOR . $namexml;
-	$source = $output.'.xml'; 
-
-	//Formulaire de recherche
-	$html=''; 
-	$html.='<div id="search-ti">';
-	$html.='<h2>Rechercher dans ce document</h2>';
-	$html.='<form action="#search-ri" method="post">';
-	$html.='<input type="hidden" name="action" value="seek">';
-	$html.='<input class="search" type="text" name="mots" size=35 maxlength=100 value="">';
-	$html.='<input type="submit" value="ok" id="submit_search">';
-	$html.='</form>';
-	$html.='</div>';
-	$mots=$_POST['mots'];
-
-
-	//si mots-clés recherchés 
-	if ($mots!="") 
-	{ 
-		$listing= array();
-		$i=0;
-		while(loop_files_for_item($item)) 
-		{
-			$file = get_current_file();
-			if ($file->hasThumbnail()) 
-			{
-				$listing[$i]=$file->original_filename;//Création du tableau avec les images de l'item
-			}
-			$i++;
-		}
-		sort($listing);	// trie le tableau
-
-
-		//traitement des mots recherchés (accents, encodage, etc)
-		$match = trim($mots);//Supprime les espaces (ou d'autres caractères) en début et fin de chaîne
-		$match =utf8_decode($match);//decodage utf8
-		$match =regexAccents($match);//traitement des accents
-		$match =utf8_encode($match);//encodage accents
-
-		//traitement du fichier XML avec simpleXML 
-		// exemple fichier xml :
-		//<pdf2xml>
-		//	<page number="X">	
-		//		<text>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</text>
-		//		<text>Maecenas diam lacus, blandit sit amet tempor auctor, luctus at eros</text>
-		//		<text>Morbi ligula arcu, aliquam non ornare nec, venenatis eget lorem.</text>
-		//	</page>
-		//	<page number="X">...
-
-
-		$xml = new SimpleXMLElement($source,null,true);
-		$results = $xml->xpath('page');
-		$html.='<div id="vtext">';
-		$i=0;
-
-		//si mots recherchés apparaissent dans la chaîne <text>, on renvoie mots clés recherchés surlignés et son contexte ainsi que le numéro de page et le lien vers la vue "image".
-		foreach($results as $page) 
-		{
-			foreach($page->text as $text) 
-			{
-				if (preg_match("/($match)+/i", $text)) 
-				{
-					$num_pg = ($page['number']-1);
-					$pg = $listing["$num_pg"];
-					$pg = label_page($pg);//libellé de la page
-					$html.= "<a href=\"?image=$num_pg#bibnum\">$pg</a> : \r\n";//lien vers l'image
-					$html.= highlight($match,$text) ."<br/>";//surlignage
-					$i++;
-				}
-				else {}
-			}
-		}
-
-		if ($i=='0'){$html.='<b>Aucun résultat trouvé pour cette recherche</b>';}//si aucun résultat
-		$html.='</div><br/>';}
-		else {}
-		$html.='</div>';
-		return $html;//on retourne les résultats
-	}
