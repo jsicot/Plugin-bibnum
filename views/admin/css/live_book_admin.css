@@ -1,7 +1,11 @@
 /* Live Book css quickly modified for admin default theme */
 
-/* Toolbars */
-#live_book #tools .blankG,
-#live_book #tools .blankL {
-    width:15px;
+/* Toolbar */
+#item-image #main_page #live_book_view .item-file img {
+  max-height: 320px;
+  max-width: 480px;
+  overflow: hidden;
+}
+#live_book .openpage {
+  padding: 0;
 }

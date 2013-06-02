@@ -25,90 +25,55 @@ Then install it like any other Omeka plugin and follow the config instructions.
 The plugin is published as it, but you can adapt libraries/live_book_custom.php
 to comply with your metadata.
 
-Furthermore, in order to append the viewer on the page, the items/show.php file
+Furthermore, in order to append the viewer on the page, the `items/show.php` file
 in your theme should be updated:
 
-* Admin item view
-Replace line 42 in admin theme (default is admin/themes/default/items/show.php):
+### Admin item view (just the item files viewer)
+- Add this line just before `echo head(...)`, line 10 of `admin/themes/default/items/show.php`:
 
 ```
-    echo display_files_for_item(array('imageSize' => 'fullsize'));
+    fire_plugin_hook('admin_theme_header', array('view' => $this));
+```
+
+- Add this line just after `echo item_image_gallery(...)` lines 17-19:
+
+```
+    fire_plugin_hook('live_book_item_image', array('view' => $this));
+```
+
+### Public item view (all tabs):
+- Add this line just before `echo head(...)` in the `items/show.php` file:
+
+```
+    fire_plugin_hook('public_theme_header', array('view' => $this));
+```
+
+- Replace:
+
+```
+    <div id="item-metadata">
+        <?php echo all_element_texts('item'); ?>
+    </div>
+    <h3><?php echo __('Files'); ?></h3>
+    <div id="item-images">
+         <?php echo files_for_item(); ?>
+    </div>
 ```
 
 by:
 
 ```
-    if (function_exists(live_book_append_to_item)) :
-        echo live_book_admin_append_to_item($item);
-    else :
-        echo display_files_for_item(array('imageSize' => 'fullsize'));
-    endif;
+    <?php fire_plugin_hook('live_book_tabs', array('view' => $this, 'tabs' => array(
+        'item-image', 'item-metadata', 'file-metadata', 'table-of-content', 'notes', 'search-content',
+    ))); ?>
 ```
 
-* Public item view
+So the page displays a toolbar and ordered tabs for image, item metadata, table
+of content, full notes, file metadata and search/result inside the content of
+the current item.
 
-The plugin need some similar changes in your theme. For example, if you had:
-
-```
-    <?php
-        echo custom_show_item_metadata();
-        echo plugin_append_to_items_show();
-    ?>
-```
-
-you can change it with:
-
-```
-    <?php if (function_exists(live_book_append_to_item)) : ?>
-        <div id="tabs">
-            <ul>
-                <li><a href="#view"><?php echo __('View');?></a></li>
-                <li><a href="#notice"><?php echo __('Record');?></a></li>
-                <?php if ($tableOfContent = live_book_tableOfContent()) : ?>
-                <li><a href="#index"><?php echo __('Index');?></a></li>
-                <?php endif; ?>
-                <?php if ($notes = '') : ?>
-                <li><a href="#notes"><?php echo __('Notes');?></a></li>
-                <?php endif; ?>
-                <?php if ($searchContent = live_book_searchContent()) : ?>
-                <li><a href="#search_content"><?php echo __('Search');?></a></li>
-                <?php endif; ?>
-            </ul>
-            <!-- view -->
-            <?php echo live_book_append_to_item(); ?>
-            <!-- notice -->
-            <div id="notice">
-            <?php
-                // The following function prints all the the metadata associated
-                // with an item: Dublin Core, extra element sets, etc. See
-                // http://omeka.org/codex or the examples on items/browse for
-                // information on how to print only select metadata fields.
-                echo custom_show_item_metadata();
-                echo plugin_append_to_items_show();
-            ?>
-            </div>
-            <?php if ($tableOfContent) : ?>
-            <!-- index -->
-            <?php echo $tableOfContent;?>
-            <?php endif; ?>
-            <?php if ($notes) : ?>
-            <!-- notes -->
-            <div id="notes">
-                <?php echo $notes;?>
-            </div>
-            <?php endif; ?>
-            <!-- search_content -->
-            <?php if ($searchContent) : ?>
-            <div id="search_content">
-                <?php echo $searchContent;?>
-            </div>
-            <?php endif; ?>
-        </div>
-    <?php endif; ?>
-```
-
-So the page displays a toolbar and, for the public page, from two to five tabs:
-image, metadata, table of content, description and search/result.
+Finally, you should adapt the css, currently adapted only for a set of images
+with same size.
 
 
 Warning
